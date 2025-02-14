@@ -57,7 +57,7 @@ def merge_add_to_original(original_text, add_text):
         original_text (str): original onomatopoeia list
         add_text (str): added onomatopoeia list
     Returns:
-        str: merged onomatopoeia list
+        str: merged onomatopoeia text
     """
     original_groups = parse_input(original_text)
     add_groups = parse_input(add_text)
@@ -91,12 +91,22 @@ def preprocess_text(text):
     '''
     reduce multiple newline to single newline, filter out invisible characters, content in parenthesis.
     '''
-    # invisible characters
+    # invisible characters, \uFE0F 
     text = re.sub(r'[\p{M}\p{Cf}]', '', text)
     # content in parenthesis
     text = re.sub(r'【[^】]*】|（[^）]*）|〈[^〉]*〉|（[^）]*）', '', text)
     text = re.sub(r'\n+', '\n', text)
 
+    return text
+
+def postprocess_text(text):
+    '''
+    reduce multiple fullwidth space to single fullwidth space, filter out fullwidth space if at the end or begin, after that, reduce multiple \n to \n
+    '''
+    text = re.sub('[♡♪]+', r'\u3000', text)
+    text = re.sub(r'\u3000+', r'\u3000', text)
+    text = re.sub(r'^\u3000+|\u3000+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*\n', '\n', text)
     return text
 
 def merge_input_to_onomato_list(text=None):
@@ -106,7 +116,7 @@ def merge_input_to_onomato_list(text=None):
     Args:
         text (str): onomatopoeia list
     Returns:
-        str: merged onomatopoeia list
+        str: merged onomatopoeia text
     """
     lines = []
     while True:
@@ -121,38 +131,71 @@ def merge_input_to_onomato_list(text=None):
         new_words.extend(words_in_line)
     if text is None:
         text = ""
-    merged_lines = merge_add_to_original(text, "\n".join(new_words))
-    return merged_lines
+    merged_texts = merge_add_to_original(text, "\n".join(new_words))
+    return merged_texts
 
-def filter_onomatopoeia(words, candidates):
+class OnomatopoeiaPatternMatcher:
+    def __init__(self, candidate_file):
+        # You can extend this list based on your needs
+        with open(candidate_file, 'r', encoding='utf-8') as f:
+            self.candidate_words = [line.strip() for line in f.readlines() if line.strip()]
+        # Special suffix words (送り仮名など)
+        self.special_words = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い", "ー", "る", "～", "っ","ッ", "゛", "ル", "ォォ"]
+        
+        # Build the regex pattern
+        self._build_pattern()
+    
+    def _build_pattern(self):
+        # Escape special characters in candidate words
+        escaped_candidates = [re.escape(word) for word in self.candidate_words]
+        # Join candidates with OR operator
+        candidates_pattern = '|'.join(escaped_candidates)
+        
+        # Escape special characters in special words
+        escaped_specials = [re.escape(word) for word in self.special_words]
+        # Join special words with OR operator and allow repetition of each special word
+        specials_pattern = '|'.join(f'(?:{word})+' for word in escaped_specials)
+        
+        # Complete pattern:
+        # - (?:{candidates}) : One candidate word
+        # - (?:(?:{specials}))* : Zero or more groups of repeated special words
+        # - (?: ... )+ : One or more of the above combination
+        self.pattern = re.compile(
+            f'(?:(?:{specials_pattern})+|(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+)',
+            re.V1
+        )
+    
+    def find_matches(self, text):
+        """Find all onomatopoeia matches in the given text."""
+        return self.pattern.finditer(text)
+    
+    def is_match(self, text):
+        """Check if the entire text is a valid onomatopoeia."""
+        return bool(self.pattern.fullmatch(text))
+
+def filter_onomatopoeia(words):
     """
     filter out onomatopoeia patterns from words
 
     Args:
         words (list): words to filter
-        candidates (list): onomatopoeia words, candidates has to be well ordered, each group has same initial character
-                            each word in the same group is ordered from longest to shortest length
     Returns:
         list: filtered onomatopoeia
     """
-    # Prepare the suffix regex pattern using escaped special words
-    special_words = ["ぁ","へ", "お", "れろ", "ん", "う", "ぅ", "い", "ー", "る"]
-    segments = []
-    for candidate in candidates:
-        # Pattern for segments starting with this candidate
-        segment_pattern = rf"{candidate}([{''.join(special_words)}]*っ?)"
-        segments.append(segment_pattern)
-    # The word should match one or more of these segments in sequence
-    onomato_pattern = rf"({'|'.join(segments)})+"
     # Memoize the validation function to optimize repeated checks
+    matcher = OnomatopoeiaPatternMatcher('onomato.txt')
     @lru_cache(maxsize=None)
     def is_onomato(subword):
-        return bool(re.fullmatch(onomato_pattern, subword))
+        return matcher.is_match(subword)
 
-    # result = [word for word in words if not is_onomato(word)]
     result = []
+    japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
+    full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
     for i,word in enumerate(words):
-        if not is_onomato(word):
+        clean_word = re.sub(f"[^{japanese_characters}{full_width_alpnums}]", "", word)
+        if is_onomato(clean_word):
+            result.append('\u3000')
+        else:
             result.append(word)
     return result
 
@@ -173,7 +216,7 @@ def segment_to_words(text):
     # "～" (U+FF5E)	(e.g., "3～5" for "3 to 5"). "〜" (U+301C)	Used in natural Japanese text, (e.g., "あ〜", "ん〜")
     japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
     full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
-    brackets = r'「[^」]*」|『[^』]*』|（[^）]*）|〈[^〉]*〉|［[^］]*］|【[^】]*】|｛[^｝]*｝'
+    brackets = r'「[^」]*」|『[^』]*』|（[^）]*）|〈[^〉]*〉|［[^］]*］|【[^】]*】|｛[^｝]*｝|《[^》]*》'
     # Regex pattern:
     # - Japanese characters followed by zero or more weak delimiters, then a strong delimiter or newline
     # - Or, sequences of weak delimiters alone
