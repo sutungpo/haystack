@@ -107,6 +107,7 @@ def postprocess_text(text):
     text = re.sub(r'\u3000+', r'\u3000', text)
     text = re.sub(r'^\u3000+|\u3000+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*\n', '\n', text)
+    text = re.sub(r'^\P{L}*\n|^[^\S]+$', '', text, flags=re.MULTILINE)
     return text
 
 def merge_input_to_onomato_list(text=None):
@@ -140,8 +141,8 @@ class OnomatopoeiaPatternMatcher:
         with open(candidate_file, 'r', encoding='utf-8') as f:
             self.candidate_words = [line.strip() for line in f.readlines() if line.strip()]
         # Special suffix words (送り仮名など)
-        self.special_words = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い", "ー", "る", "～", "っ","ッ", "゛", "ル", "ォォ"]
-        
+        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い","ぃ", "ー", "る", "～", "〜", "っ","ッ", "゛", "ル", "ォォ"]
+        self.exceptions = ['ううん', 'いいっ', 'はぁーい']
         # Build the regex pattern
         self._build_pattern()
     
@@ -152,7 +153,7 @@ class OnomatopoeiaPatternMatcher:
         candidates_pattern = '|'.join(escaped_candidates)
         
         # Escape special characters in special words
-        escaped_specials = [re.escape(word) for word in self.special_words]
+        escaped_specials = [re.escape(word) for word in self.special_chars]
         # Join special words with OR operator and allow repetition of each special word
         specials_pattern = '|'.join(f'(?:{word})+' for word in escaped_specials)
         
@@ -171,6 +172,8 @@ class OnomatopoeiaPatternMatcher:
     
     def is_match(self, text):
         """Check if the entire text is a valid onomatopoeia."""
+        if text in self.exceptions:
+            return False
         return bool(self.pattern.fullmatch(text))
 
 def filter_onomatopoeia(words):
@@ -277,5 +280,13 @@ def compare_texts_char_level_with_positions(original, processed):
         elif item.startswith('+'):  # Inserted character
             inserted.append((processed_index, item[2:]))  # Store (position, character)
             processed_index += 1
-
-    return inserted, deleted
+    inserted_chars = segment_to_words(''.join([char[1] for char in inserted]))
+    deleted_chars = segment_to_words(''.join([char[1] for char in deleted]))
+    matcher = OnomatopoeiaPatternMatcher('onomato.txt')
+    final_deleted = []
+    for char in deleted_chars:
+        match = re.search(r'\p{L}+', char)
+        if match:
+            if match.group() not in matcher.candidate_words:
+                final_deleted.append(char)
+    return inserted_chars, final_deleted
