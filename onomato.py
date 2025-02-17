@@ -4,6 +4,10 @@ import regex as re
 from pathlib import Path
 from functools import lru_cache
 from collections import defaultdict
+from logging import getLogger, basicConfig, DEBUG
+
+basicConfig(level=DEBUG)
+logger = getLogger(__name__)
 
 KANA_ORDER = [
     'あ', 'い', 'う', 'え', 'お',
@@ -141,8 +145,10 @@ class OnomatopoeiaPatternMatcher:
         with open(candidate_file, 'r', encoding='utf-8') as f:
             self.candidate_words = [line.strip() for line in f.readlines() if line.strip()]
         # Special suffix words (送り仮名など)
-        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い","ぃ", "ー", "る", "～", "〜", "っ","ッ", "゛", "ル", "ォォ"]
-        self.exceptions = ['ううん', 'いいっ', 'はぁーい']
+        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い","ぃ", "ー", "る", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ"]
+        self.exceptions = ['ううん', 'いいっ', 'はぁーい', 'あっつ', 'いい', 'いやっ', 'やぁっ']
+        self.unkowns = ['こく']
+        self.known_onomato = ['く', 'ぐ', 'いっぱぁい']
         # Build the regex pattern
         self._build_pattern()
     
@@ -161,9 +167,11 @@ class OnomatopoeiaPatternMatcher:
         # - (?:{candidates}) : One candidate word
         # - (?:(?:{specials}))* : Zero or more groups of repeated special words
         # - (?: ... )+ : One or more of the above combination
+        # Matched Pattern:
+        # consecutive special words or (non-initial "ぃ" + zero or more special words + candidate word + zero or more special words)+
         self.pattern = re.compile(
-            f'(?:(?:{specials_pattern})+|(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+)',
-            re.V1
+            f'(?:{specials_pattern})+|(?!ぃ|い)(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+',
+            re.VERBOSE
         )
     
     def find_matches(self, text):
@@ -174,6 +182,10 @@ class OnomatopoeiaPatternMatcher:
         """Check if the entire text is a valid onomatopoeia."""
         if text in self.exceptions:
             return False
+        elif text in self.unkowns:
+            logger.warning(f'unknown onomatopoeia: {text}')
+        elif text in self.known_onomato:
+            return True
         return bool(self.pattern.fullmatch(text))
 
 def filter_onomatopoeia(words):
