@@ -9,6 +9,9 @@ from logging import getLogger, basicConfig, DEBUG
 basicConfig(level=DEBUG)
 logger = getLogger(__name__)
 
+Japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
+Full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
+
 KANA_ORDER = [
     'あ', 'い', 'う', 'え', 'お',
     'か', 'き', 'く', 'け', 'こ',
@@ -107,7 +110,7 @@ def postprocess_text(text):
     '''
     reduce multiple fullwidth space to single fullwidth space, filter out fullwidth space if at the end or begin, after that, reduce multiple \n to \n
     '''
-    text = re.sub('[♡♪]+', r'\u3000', text)
+    text = re.sub('[♡❤♪]+', r'\u3000', text)
     text = re.sub(r'\u3000+', r'\u3000', text)
     text = re.sub(r'^\u3000+|\u3000+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*\n', '\n', text)
@@ -145,8 +148,10 @@ class OnomatopoeiaPatternMatcher:
         with open(candidate_file, 'r', encoding='utf-8') as f:
             self.candidate_words = [line.strip() for line in f.readlines() if line.strip()]
         # Special suffix words (送り仮名など)
-        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い","ぃ", "ー", "る", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ"]
-        self.exceptions = ['ううん', 'いいっ', 'はぁーい', 'あっつ', 'いい', 'いやっ', 'やぁっ']
+        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い","ぃ", "ー", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ"]
+        ## exceptions are words that are not onomatopoeia but are match the pattern
+        self.exceptions = ['ううん', 'いいっ', 'はぁーい', 'あっつ', 'いい', 'いやっ', 'やぁっ', 'あほっ', 'おはっ']
+        ## unknown not sure onomatopoeia or not
         self.unkowns = ['こく']
         self.known_onomato = ['く', 'ぐ', 'いっぱぁい']
         # Build the regex pattern
@@ -161,7 +166,7 @@ class OnomatopoeiaPatternMatcher:
         # Escape special characters in special words
         escaped_specials = [re.escape(word) for word in self.special_chars]
         # Join special words with OR operator and allow repetition of each special word
-        specials_pattern = '|'.join(f'(?:{word})+' for word in escaped_specials)
+        specials_pattern = '|'.join(f'(?:{word})' for word in escaped_specials)
         
         # Complete pattern:
         # - (?:{candidates}) : One candidate word
@@ -169,10 +174,11 @@ class OnomatopoeiaPatternMatcher:
         # - (?: ... )+ : One or more of the above combination
         # Matched Pattern:
         # consecutive special words or (non-initial "ぃ" + zero or more special words + candidate word + zero or more special words)+
-        self.pattern = re.compile(
-            f'(?:{specials_pattern})+|(?!ぃ|い)(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+',
-            re.VERBOSE
-        )
+        final_pattern = rf'''
+            \b[っつぁあ]\b|
+            ^(?![ぃいっ])(?:{specials_pattern}){{2,}}|
+            ^(?![ぃいっ])(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+'''
+        self.pattern = re.compile(final_pattern,re.VERBOSE)
     
     def find_matches(self, text):
         """Find all onomatopoeia matches in the given text."""
@@ -187,32 +193,6 @@ class OnomatopoeiaPatternMatcher:
         elif text in self.known_onomato:
             return True
         return bool(self.pattern.fullmatch(text))
-
-def filter_onomatopoeia(words):
-    """
-    filter out onomatopoeia patterns from words
-
-    Args:
-        words (list): words to filter
-    Returns:
-        list: filtered onomatopoeia
-    """
-    # Memoize the validation function to optimize repeated checks
-    matcher = OnomatopoeiaPatternMatcher('onomato.txt')
-    @lru_cache(maxsize=None)
-    def is_onomato(subword):
-        return matcher.is_match(subword)
-
-    result = []
-    japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
-    full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
-    for i,word in enumerate(words):
-        clean_word = re.sub(f"[^{japanese_characters}{full_width_alpnums}]", "", word)
-        if is_onomato(clean_word):
-            result.append('\u3000')
-        else:
-            result.append(word)
-    return result
 
 def segment_to_words(text):
     '''
@@ -229,8 +209,8 @@ def segment_to_words(text):
     weak_delimiters = r'…♪♡♥　\p{Emoji_Presentation}'
     strong_delimiters = r'。、？！'
     # "～" (U+FF5E)	(e.g., "3～5" for "3 to 5"). "〜" (U+301C)	Used in natural Japanese text, (e.g., "あ〜", "ん〜")
-    japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
-    full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
+    # japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
+    # full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
     brackets = r'「[^」]*」|『[^』]*』|（[^）]*）|〈[^〉]*〉|［[^］]*］|【[^】]*】|｛[^｝]*｝|《[^》]*》'
     # Regex pattern:
     # - Japanese characters followed by zero or more weak delimiters, then a strong delimiter or newline
@@ -238,7 +218,7 @@ def segment_to_words(text):
     pattern = rf'''
         (?P<bracket>{brackets})
         |(?P<group>[{weak_delimiters}]*
-        (?:[{japanese_characters}{full_width_alpnums}]+)
+        (?:[{Japanese_characters}{Full_width_alpnums}]+)
         (?:[{weak_delimiters}]*[{strong_delimiters}]*[{weak_delimiters}]*)?)
         |(?P<delimiters>[{weak_delimiters}]+)
         |(?P<newline>\n+)
@@ -263,6 +243,31 @@ def segment_to_words(text):
     if start < len(text):
         segments.append(text[start:])
     return segments
+
+def filter_onomatopoeia_from_text(text):
+    """
+    filter out onomatopoeia patterns from text
+    """
+    text_final = preprocess_text(text)
+    text_segments = segment_to_words(text_final)
+    matcher = OnomatopoeiaPatternMatcher('onomato.txt')
+    @lru_cache(maxsize=None)
+    def is_onomato(subword):
+        return matcher.is_match(subword)
+
+    result = []
+    for i,word in enumerate(text_segments):
+        clean_word = re.sub(f"[^{Japanese_characters}{Full_width_alpnums}]", "", word)
+        if is_onomato(clean_word):
+            result.append('\u3000')
+        else:
+            result.append(word)
+    post_pattern = ['こく、こく', 'こくっ、こくっ']
+    post_pattern = '|'.join(post_pattern)
+    result = re.sub(r'(?<!…)(\b[おう]、)', '', ''.join(result))
+    result = re.sub(post_pattern, '', result)
+    result = postprocess_text(result)
+    return result
 
 def compare_texts_char_level_with_positions(original, processed):
     '''
