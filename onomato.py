@@ -1,6 +1,7 @@
 import sys
 import difflib
 import regex as re
+import jaconv
 from pathlib import Path
 from functools import lru_cache
 from collections import defaultdict
@@ -98,6 +99,7 @@ def preprocess_text(text):
     '''
     reduce multiple newline to single newline, filter out invisible characters, content in parenthesis.
     '''
+    # text = jaconv.kata2hira(text)
     # invisible characters, \uFE0F 
     text = re.sub(r'[\p{M}\p{Cf}]', '', text)
     # content in parenthesis
@@ -122,21 +124,16 @@ def merge_input_to_onomato_list(text=None):
     merge input to onomatopoeia list
     first input from user, filter out all non-kana characters, then merge to text
     Args:
-        text (str): onomatopoeia list
+        text (str): onomatopoeia list, assume each line is a onomatopoeia word
     Returns:
         str: merged onomatopoeia text
     """
-    lines = []
+    new_words = []
     while True:
-        line = input("input onomatopoeias:").strip()
+        line = input("input onomatopoeias, null to exit:\n").strip()
         if line == "":
             break
-        lines.append(line)
-
-    new_words = []
-    for line in lines:
-        words_in_line = re.findall(r'[\u3040-\u309F\u30A0-\u30FFー]+', line)
-        new_words.extend(words_in_line)
+        new_words.append(line)
     if text is None:
         text = ""
     merged_texts = merge_add_to_original(text, "\n".join(new_words))
@@ -148,9 +145,9 @@ class OnomatopoeiaPatternMatcher:
         with open(candidate_file, 'r', encoding='utf-8') as f:
             self.candidate_words = [line.strip() for line in f.readlines() if line.strip()]
         # Special suffix words (送り仮名など)
-        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "い","ぃ", "ー", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ"]
+        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "ぃ", "ー", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ", "ォ"]
         ## exceptions are words that are not onomatopoeia but are match the pattern
-        self.exceptions = ['ううん', 'いいっ', 'はぁーい', 'あっつ', 'いい', 'いやっ', 'やぁっ', 'あほっ', 'おはっ']
+        self.exceptions = ['ううん', 'はぁーい', 'はぁい', 'あっつ', 'やぁっ', 'あほっ', 'おはっ']
         ## unknown not sure onomatopoeia or not
         self.unkowns = ['こく']
         self.known_onomato = ['く', 'ぐ', 'いっぱぁい']
@@ -158,6 +155,9 @@ class OnomatopoeiaPatternMatcher:
         self._build_pattern()
     
     def _build_pattern(self):
+        ## test case
+        # self.candidate_words = ['っぅう', 'っぁん']
+        # self.special_chars = [ "あ","ん", "う", "ぅ", "っ", "つ"]
         # Escape special characters in candidate words
         escaped_candidates = [re.escape(word) for word in self.candidate_words]
         # Join candidates with OR operator
@@ -176,8 +176,9 @@ class OnomatopoeiaPatternMatcher:
         # consecutive special words or (non-initial "ぃ" + zero or more special words + candidate word + zero or more special words)+
         final_pattern = rf'''
             \b[っつぁあ]\b|
-            ^(?![ぃいっ])(?:{specials_pattern}){{2,}}|
-            ^(?![ぃいっ])(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+'''
+            ^(?<![ぃいっ])(?:{specials_pattern}){{2,}}|
+            ^(?<![ぃいっ])(?:(?:{specials_pattern})*(?:{candidates_pattern})(?:{specials_pattern})*)+
+        '''
         self.pattern = re.compile(final_pattern,re.VERBOSE)
     
     def find_matches(self, text):
@@ -262,10 +263,9 @@ def filter_onomatopoeia_from_text(text):
             result.append('\u3000')
         else:
             result.append(word)
-    post_pattern = ['こく、こく', 'こくっ、こくっ']
+    post_pattern = ['こく、こく', 'こくっ、こくっ', 'お、', 'ぉ、', 'う、']
     post_pattern = '|'.join(post_pattern)
-    result = re.sub(r'(?<!…)(\b[おう]、)', '', ''.join(result))
-    result = re.sub(post_pattern, '', result)
+    result = re.sub(rf'(?<!\p{{L}})({post_pattern})', '', ''.join(result))
     result = postprocess_text(result)
     return result
 
