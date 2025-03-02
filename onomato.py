@@ -10,6 +10,7 @@ from logging import getLogger, basicConfig, DEBUG
 basicConfig(level=DEBUG)
 logger = getLogger(__name__)
 
+# full-width tilde \uFF5E and wave dash \u301C
 Japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
 Full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
 
@@ -112,11 +113,11 @@ def postprocess_text(text):
     '''
     reduce multiple fullwidth space to single fullwidth space, filter out fullwidth space if at the end or begin, after that, reduce multiple \n to \n
     '''
-    text = re.sub('[♡❤♪]+', r'\u3000', text)
-    text = re.sub(r'\u3000+', r'\u3000', text)
-    text = re.sub(r'^\u3000+|\u3000+$', '', text, flags=re.MULTILINE)
+    text = re.sub('[♡❤♥♪]+', r'\u3000', text)
     text = re.sub(r'\s*\n', '\n', text)
     text = re.sub(r'^\P{L}*\n|^[^\S]+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'[\u0020\u3000]{2,}', lambda m: m.group(0)[0], text)
+    text = re.sub(r'^[\u3000+\u0020]+|[\u3000\u0020]+$', '', text, flags=re.MULTILINE)
     return text
 
 def merge_input_to_onomato_list(text=None):
@@ -147,7 +148,7 @@ class OnomatopoeiaPatternMatcher:
         # Special suffix words (送り仮名など)
         self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "ぃ", "ー", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ", "ォ"]
         ## exceptions are words that are not onomatopoeia but are match the pattern
-        self.exceptions = ['ううん', 'はぁーい', 'はぁい', 'あっつ', 'やぁっ', 'あほっ', 'おはっ']
+        self.exceptions = ['ううん', 'ううんっ','はぁーい', 'はぁい', 'あっつ', 'やぁっ', 'あほっ', 'おはっ']
         ## unknown not sure onomatopoeia or not
         self.unkowns = ['こく']
         self.known_onomato = ['く', 'ぐ', 'いっぱぁい']
@@ -263,7 +264,7 @@ def filter_onomatopoeia_from_text(text):
             result.append('\u3000')
         else:
             result.append(word)
-    post_pattern = ['こく、こく', 'こくっ、こくっ', 'お、', 'ぉ、', 'う、']
+    post_pattern = ['こく、こく', 'こくっ、こくっ', 'お、', 'ぉ、', 'う、', 'あ、']
     post_pattern = '|'.join(post_pattern)
     result = re.sub(rf'(?<!\p{{L}})({post_pattern})', '', ''.join(result))
     result = postprocess_text(result)
