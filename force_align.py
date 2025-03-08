@@ -1,10 +1,14 @@
 from pydoc import text
 import regex as re
-import math
-import unicodedata
 from pathlib import Path
-from functools import partial
 from logging import getLogger, basicConfig, DEBUG
+from onomato import *
+import textgrid
+import unicodedata
+import subprocess
+from difflib import SequenceMatcher
+from typing import List, Tuple, Optional
+from dataclasses import dataclass
 
 basicConfig(level=DEBUG)
 logger = getLogger(__name__)    
@@ -27,6 +31,9 @@ class IntervalTier:
 
     def __repr__(self):
         return f'IntervalTier(name="{self.name}", xmin={self.start}, xmax={self.end}, intervals={self.intervals})'
+    
+    def __iter__(self):
+        return self.intervals
 
 class TextGrid:
     def __init__(self, file_path=None):
@@ -38,6 +45,12 @@ class TextGrid:
 
     def __repr__(self):
         return f'TextGrid(xmin={self.start}, xmax={self.end}, tiers={self.tiers})'
+    
+    def get_tier(self, name):
+        for tier in self.tiers:
+            if tier.name == name:
+                return tier
+        return None
 
     def read_textgrid(self,file_path):
         with open(file_path, 'r', encoding='utf-8') as file:
@@ -87,121 +100,237 @@ class TextGrid:
                     file.write(f'            xmax = {interval.end}\n')
                     file.write(f'            text = "{interval.text}"\n')
 
-def tokenize(text):
-    from japanese import JapaneseTokenizer
-    tokenizer = JapaneseTokenizer()
-    tokens = tokenizer(text)
-    result = tokens[0].split()
-    return result
+@dataclass
+class TextSegment:
+    """Represents a segment of text with timing information"""
+    start_time: float
+    end_time: float
+    line_text: str
 
-def preprocess_text(text):
-    invisible_pattern = r'[\p{Z}]'
-    final_text = []
-    for line in text.split('\n'):
-        line = re.sub(invisible_pattern, '', line.strip())
-        line = unicodedata.normalize('NFKC', line)
-        if line == '':
-            continue
-        if line.startswith('(') or line.startswith('（'):
-            continue
-        final_text.append(line)
-    return final_text
+@dataclass
+class LineSegment:
+    """Represents timing information for a full line of text"""
+    line_num: int
+    start_time: float
+    end_time: float
+    confidence: float
+    line_text: str
 
-def merge_text(text_with_timestamp):
-    SPAN_TIME = 10.0
-    merged_text = []
-    current_line = text_with_timestamp[0]
-    current_num = 1
-    for line in text_with_timestamp[1:]:
-        _, current_line_text, current_line_start_time, _ = current_line.strip().split('\t')
-        current_line_start_time = float(current_line_start_time)
-        _, text, start_time, end_time = line.strip().split('\t')
-        start_time, end_time = float(start_time), float(end_time)
-        if end_time - current_line_start_time < SPAN_TIME:
-            end_mark = '' if re.search('[。！？]$', current_line_text) else '。'
-            current_line_text = current_line_text + end_mark + text
-            current_line = f'{current_num}\t{current_line_text}\t{current_line_start_time}\t{end_time}\n'
-        else:
-            current_num += 1
-            merged_text.append(current_line)
-            num_pattern = r'^\d+'
-            current_line = re.sub(num_pattern, str(current_num), line)
-    merged_text.append(current_line)
-    prev_end_time = None
-    for i, line in enumerate(merged_text):
-        _, _, start_time, end_time = line.strip().split('\t')
-        start_time, end_time = float(start_time), float(end_time)
-        if prev_end_time is not None and math.isclose(prev_end_time, start_time):
-            logger.warning(f'Line {i+1} start time is the same as line {i} end_time')
-        prev_end_time = end_time
-    return merged_text
+class JapaneseTextAligner:
+    def __init__(self, textgrid_path: str | Path):
+        self.textgrid_path = textgrid_path
+        self.start = 0
+    
+    def _filter_non_japanese(self, text: str) -> str:
+        """Remove non-Japanese characters from text"""
+        return re.sub(rf'[^{Japanese_characters}{Full_width_alpnums}]', '', text)
 
-def align_line_timestamps(transcript, intervals):
-    # iterate over each line of the transcript
-    # for each line iteration, first tokenize the line as token set, then iterate over each interval until the interval's text is not in the set
-    # cache these iterated intervals, its first interval's start time and last interval's end time as the line's start and end time
-    # track the intervals that have been iterated over to avoid iterating over them again
-    punctuation_pattern = r'[\p{P}\p{S}]'
-    strip_lines_list = preprocess_text(transcript)
-    current_interval_idx = 0
-    refined_lines = []
-    for line_idx, line in enumerate(strip_lines_list): 
-        t_list = tokenize(line)
-        non_punc_tokens_list = [token for token in t_list if not re.match(punctuation_pattern, token)]
-        if not non_punc_tokens_list:
-            continue
-        non_punc_token_set = set(non_punc_tokens_list)
-        start_time = None
-        start_token = None
-        end_time = None
-        end_token = None
-        matched_nums = 0
-        for i in range(current_interval_idx, len(intervals)):
-            if matched_nums == len(non_punc_tokens_list):
-                break
-            if intervals[i].text in non_punc_token_set:
-                if start_time is None:
-                    start_time = intervals[i].start
-                    start_token = intervals[i].text
-                end_time = intervals[i].end
-                end_token = intervals[i].text
-                current_interval_idx = i + 1
-                matched_nums += 1
-        if start_token != non_punc_tokens_list[0] or end_token != non_punc_tokens_list[-1]:
-            logger.warning(f'Line {line_idx+1} start with "{non_punc_tokens_list[0]}" does not match with the corresponding interval')
-        start_time = start_time if start_time is not None else 0.0
-        end_time = end_time if end_time is not None else 0.0
-        refined_line = str(line_idx+1) + '\t' + line + '\t' + f'{start_time:.2f}' +'\t' + f'{end_time:.2f}' + '\n'
-        refined_lines.append(refined_line)
-    return refined_lines
+    def _normalize_japanese(self, text: str) -> str:
+        """Normalize Japanese text for better matching"""
+        text = unicodedata.normalize('NFKC', text)
+        # the alphanumeric characters are converted from full width to ascii lowercase
+        text = text.lower()
+        return ''.join(text.split())
 
-if __name__ == '__main__':
-    textgrid_file = r"D:\codes\mfa\暇つぶしセックス.TextGrid"
-    transcript_file = r"E:\jav\RJ codes\101-\RJ01051681\1 『暇つぶしセックス。どーお』.txt"
-    audio_file = r".\プロローグ.mp3"
-    textgrid = TextGrid(textgrid_file)
-    with open(transcript_file, 'r', encoding='utf-8') as file:
-        transcript = file.read()
-    intervals = TextGrid(textgrid_file).tiers[0].intervals
-    refined_lines = align_line_timestamps(transcript, intervals)
-    transcript_refined_file = Path(transcript_file).stem + '_refined.txt'
-    with open(transcript_refined_file, 'w', encoding='utf-8') as file:
-        file.write(''.join(refined_lines))
-    refined_lines = merge_text(refined_lines)
-    transcript_merged = Path(transcript_file).stem + 'merged.txt'
-    with open(transcript_merged, 'w', encoding='utf-8') as file:
-        file.write(''.join(refined_lines))
-    # result_path = Path(transcript_file).parent / 'result'
-    # result_path.mkdir(exist_ok=True)
-    # for line in refined_lines:
-    #     line_num, text, start_time, end_time = line.strip().split('\t')
-    #     line_num, start_time, end_time = int(line_num), float(start_time), float(end_time)
-    #     audio_num = result_path / f'{line_num}.mp3'
-    #     text_num = result_path / f'{line_num}.txt'
-    #     with open(text_num, 'w', encoding='utf-8') as file:
-    #         file.write(text)
-    #     cmd = ['ffmpeg', '-i', audio_file, '-ss', str(start_time), '-to', str(end_time), '-c', '-loglevel', 'quiet','copy', str(audio_num)]
-    #     import subprocess
-    #     subprocess.run(cmd)
+    def _get_word_segments(self, tg: textgrid.TextGrid) -> List[TextSegment]:
+        """Extract word segments with timing from TextGrid"""
+        segments = []
+        word_tier = tg[0]
+        for interval in word_tier:
+            if interval.mark.strip():
+                segments.append(TextSegment(
+                    start_time=float(interval.minTime),
+                    end_time=float(interval.maxTime),
+                    line_text=interval.mark,
+                ))
+        # Add a dummy segment to decline the similarity score for the last line
+        segments.append(TextSegment(
+            start_time=0.0,
+            end_time=0.0,
+            line_text="++",
+        ))
+        return segments
 
+    def _find_growing_sequence(self, line: str, segments: List[TextSegment]) -> Tuple[int, int, float]:
+        """
+        Find the sequence with linearly growing similarity scores
+        
+        Args:
+            line: Target line to match
+            segments: List of available segments
+            
+        Returns:
+            Tuple of (start_index, end_index, confidence)
+        """
+        matcher = SequenceMatcher(None, "", line)
+        
+        best_start = 0
+        best_end = 0
+        best_score = 0.0
+        
+        start = self.start
+        scores = []
+        combined_text = ""
+        
+        # Build sequence and track scores
+        for end in range(start, len(segments)):
+            combined_text += segments[end].line_text
+            matcher.set_seq1(combined_text)
+            score = matcher.ratio()
+            if score < 0.01:
+                scores = []
+                combined_text = ""
+                start = start + 1
+                continue
+            scores.append(score)
+            
+            # Need at least 3 points to check growth pattern
+            if len(scores) >= 2:
+                # Check if scores are growing linearly
+                is_growing = all(scores[i] < scores[i+1] for i in range(len(scores)-1))
+                
+                # Check if growth has peaked
+                if not is_growing:
+                    current_score = scores[-2]  # Use peak score
+                    best_score = current_score
+                    best_start = start
+                    best_end = end - 1  # Use position before decline
+                    self.start = end
+                    break
+        
+        return best_start, best_end, best_score
+
+    def _find_line_matches(self, line: str, segments: List[TextSegment], line_num: int) -> Optional[LineSegment]:
+        """
+        Find best matching sequence for a line, segments are list from textgrid word elements
+        """
+        if not line.strip():
+            return None
+        MAX_LINE_TIME = 10.0
+        MIN_LINE_INTERVAL = 0.5
+        filtered_line = self._filter_non_japanese(line)
+        filtered_line = self._normalize_japanese(filtered_line)
+        start_idx, end_idx, confidence = self._find_growing_sequence(filtered_line, segments)
+        
+        if confidence < 0.6:  # Minimum threshold
+            logger.warning(f"Line {line_num} {line} has low confidence: {confidence:.2f}")
+        start_text = segments[start_idx].line_text
+        end_text = segments[end_idx].line_text
+        start_time = segments[start_idx].start_time
+        end_time = segments[end_idx].end_time
+        if line_num > 1:
+            pre_end_idx = start_idx - 1 if segments[start_idx - 1].line_text else start_idx - 2
+            pre_end_time = segments[pre_end_idx].end_time
+            if start_time - pre_end_time < MIN_LINE_INTERVAL:
+                logger.warning(f"Line {line_num} too close with previous line: {start_time - pre_end_time:.2f} seconds")
+        # error detection, too long means this line's match error, it will cover next lines' timestamps, and make them errors too, if the line's endtime is too close(<0.2s) to next line's starttime, it will be considered as a match error for both of these two lines
+        if end_time - start_time > MAX_LINE_TIME:
+            logger.error(f"Line {line_num} {line} is too long: {end_time - start_time:.2f} seconds")
+        # Check if the start and end texts match the line
+        if not re.search(f'^{start_text}', filtered_line):
+            logger.warning(f"Line {line_num} Start text mismatch: {start_text} vs {filtered_line}")
+        elif not re.search(f'{end_text}$', filtered_line):
+            logger.warning(f"Line {line_num} End text mismatch: {end_text} vs {filtered_line}")
+        
+        return LineSegment(
+            line_num= line_num,
+            start_time=segments[start_idx].start_time,
+            end_time=segments[end_idx].end_time,
+            confidence=confidence,
+            line_text=line,
+        )
+
+    def align_text(self):
+        """
+        Align text lines with TextGrid timestamps, default text file is the same as the textgrid file with .txt extension
+        first align each line start and end timestamp with textgrid, then merge lines that are too close to each other
+        side effect is to write a new text file with all lines' timestamps to ".aligned.txt" and another text with merged lines' timestamps to ".merged_aligned.txt"
+        the text and textgrid are only iterated only each once, each line content of text should be the same as textgrid or just one character difference, otherwise the alignmen will be wrong.
+        """
+        MAX_MERGED_LINE_TIME = 25.0
+        tg_path = Path(self.textgrid_path)
+        if not tg_path.exists():
+            return
+        text_path = tg_path.with_suffix('.txt')
+        if not text_path.exists():
+            return
+        with open(text_path, 'r', encoding='utf-8') as f:
+            text_lines = [line.strip() for line in f if line.strip()]
+        tg = textgrid.TextGrid.fromFile(tg_path)
+        segments = self._get_word_segments(tg)    
+
+        # align each line start and end timestamp with textgrid
+        skip = False
+        aligned_txt = tg_path.with_suffix('.aligned.txt')
+        if aligned_txt.exists():
+            response = input(f"{aligned_txt} already exists, do you want to overwrite it? (y/n)")
+            skip = response.lower().strip() == 'n'
+        if not skip:
+            with open(aligned_txt, 'w', encoding='utf-8') as f:
+                for i, line in enumerate(text_lines):
+                    line_num = i + 1
+                    line_timestamps = self._find_line_matches(line, segments, line_num)
+                    f.write(f"{line_num}\t{line_timestamps.start_time:07.2f}\t{line_timestamps.end_time:07.2f}\t{line}\n")
+
+        # then merge lines that are too close to each other
+        skip = False
+        merged_lines_txt = tg_path.with_suffix('.merged_aligned.txt')
+        if merged_lines_txt.exists():
+            response = input(f"{merged_lines_txt} already exists, do you want to overwrite it? (y/n)")
+            skip = response.lower().strip() == 'n'
+        if skip:
+            return
+        with open(aligned_txt, 'r', encoding='utf-8') as f:
+            all_line_timestamps = [TextSegment(*map(float, line.split('\t')[1:3]), line.split('\t')[3].strip()) for line in f]
+        merged_line_timestamps = []
+        current_start = all_line_timestamps[0].start_time
+        current_end = all_line_timestamps[0].end_time
+        current_text = all_line_timestamps[0].line_text
+        for timestamp in all_line_timestamps[1:]:
+            if timestamp.end_time - current_start > MAX_MERGED_LINE_TIME:
+                merged_line_timestamps.append(TextSegment(current_start, current_end,current_text))
+                current_start = timestamp.start_time
+                current_text = ""
+            current_end = timestamp.end_time
+            connector = "、" if re.search(fr'[{Japanese_characters}{Full_width_alpnums}]$', current_text) else ""
+            current_text += connector + timestamp.line_text
+        merged_line_timestamps.append(TextSegment(current_start, current_end, current_text))
+        with open(merged_lines_txt, 'w', encoding='utf-8') as f:
+            for i, line in enumerate(merged_line_timestamps):
+                if i > 0 and merged_line_timestamps[i].start_time - merged_line_timestamps[i-1].end_time < 0.5:
+                    logger.warning(f"Merged_line {i+1} too close to previous line: {merged_line_timestamps[i].start_time - merged_line_timestamps[i-1].end_time:.2f} seconds")
+                line_num = i + 1
+                def format_time(total_seconds):
+                    minutes, seconds = divmod(total_seconds, 60)
+                    return f"{int(minutes):02}:{seconds:05.2f}"
+                f.write(f"{line_num}\t{format_time(line.start_time)}\t{format_time(line.end_time)}\t{line.line_text}\n")
+
+    def split_audio(self, timestamps: List[LineSegment],audio_path = None):
+        """Split audio based on timestamps"""
+        if not timestamps or not audio_path:
+            return
+        audio = Path(audio_path)
+        if not audio.exists():
+            return
+        output = audio.parent / "split"
+        output.mkdir(parents=True, exist_ok=True)
+        timestamps.sort(key=lambda x: x.start_time)
+        time_ranges = []
+        time_boundary = 25.0
+        current_start = timestamps[0].start_time
+        current_end = timestamps[0].end_time
+        for timestamp in timestamps[1:]:
+            if timestamp.end_time - current_start > time_boundary:
+                time_ranges.append((current_start, current_end))
+                current_start = timestamp.start_time
+            current_end = timestamp.end_time
+        time_ranges.append((current_start, current_end))
+        for time_range in time_ranges:
+            start_time = time_range[0]
+            end_time = time_range[1]
+            output_path = output.joinpath(audio.stem + f"_{start_time:.1f}_{end_time:.1f}{audio.suffix}")
+            subprocess.run([
+                "ffmpeg", "-i", audio_path, "-ss", str(start_time), "-to", str(end_time),
+                "-c", "copy", output_path
+            ])
     

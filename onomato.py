@@ -13,6 +13,7 @@ logger = getLogger(__name__)
 # full-width tilde \uFF5E and wave dash \u301C
 Japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
 Full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
+Japanese_punctuations = r'。、！？「」『』（）［］｛｝…ー・～〝〟'
 
 KANA_ORDER = [
     'あ', 'い', 'う', 'え', 'お',
@@ -104,7 +105,7 @@ def preprocess_text(text):
     # invisible characters, \uFE0F 
     text = re.sub(r'[\p{M}\p{Cf}]', '', text)
     # content in parenthesis
-    text = re.sub(r'【[^】]*】|（[^）]*）|〈[^〉]*〉|（[^）]*）', '', text)
+    text = re.sub(r'【[^】]*】|（[^）]*）|〈[^〉]*〉|（[^）]*）|^[^\S\n]*//.*\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n+', '\n', text)
 
     return text
@@ -113,11 +114,12 @@ def postprocess_text(text):
     '''
     reduce multiple fullwidth space to single fullwidth space, filter out fullwidth space if at the end or begin, after that, reduce multiple \n to \n
     '''
-    text = re.sub('[♡❤♥♪]+', r'\u3000', text)
+    text = re.sub('[♡❤♥♪〓]+', r'\u3000', text)
     text = re.sub(r'\s*\n', '\n', text)
     text = re.sub(r'^\P{L}*\n|^[^\S]+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'[\u0020\u3000]{2,}', lambda m: m.group(0)[0], text)
     text = re.sub(r'^[\u3000+\u0020]+|[\u3000\u0020]+$', '', text, flags=re.MULTILINE)
+    text = re.sub(rf'([{Japanese_punctuations}])\u3000|\u3000', lambda m: m.group(1) if m.group(1) else '、', text)
     return text
 
 def merge_input_to_onomato_list(text=None):
@@ -134,6 +136,7 @@ def merge_input_to_onomato_list(text=None):
         line = input("input onomatopoeias, null to exit:\n").strip()
         if line == "":
             break
+        assert re.search(rf'^[{Japanese_characters}]+', line) is not None, "input must be kana"
         new_words.append(line)
     if text is None:
         text = ""
@@ -151,7 +154,7 @@ class OnomatopoeiaPatternMatcher:
         self.exceptions = ['ううん', 'ううんっ','はぁーい', 'はぁい', 'あっつ', 'やぁっ', 'あほっ', 'おはっ']
         ## unknown not sure onomatopoeia or not
         self.unkowns = ['こく']
-        self.known_onomato = ['く', 'ぐ', 'いっぱぁい']
+        self.known_onomato = ['いっぱぁい']
         # Build the regex pattern
         self._build_pattern()
     
