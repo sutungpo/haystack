@@ -117,8 +117,7 @@ class LineSegment:
     line_text: str
 
 class JapaneseTextAligner:
-    def __init__(self, textgrid_path: str | Path):
-        self.textgrid_path = textgrid_path
+    def __init__(self):
         self.start = 0
     
     def _filter_non_japanese(self, text: str) -> str:
@@ -232,23 +231,38 @@ class JapaneseTextAligner:
         elif not re.search(f'{end_text}$', filtered_line):
             logger.warning(f"Line {line_num} End text mismatch: {end_text} vs {filtered_line}")
         
-        return LineSegment(
-            line_num= line_num,
+        return TextSegment(
             start_time=segments[start_idx].start_time,
             end_time=segments[end_idx].end_time,
-            confidence=confidence,
             line_text=line,
         )
 
-    def align_text(self):
+    @staticmethod
+    def _format_time(total_seconds):
+        if isinstance(total_seconds, str):
+            total_seconds = float(total_seconds)
+        if not isinstance(total_seconds, (int, float)):
+            raise TypeError("total_seconds must be a number")
+        minutes, seconds = divmod(total_seconds, 60)
+        if minutes >= 60.0:
+            hours, minutes = divmod(minutes, 60)
+            return f"{int(hours):02}:{int(minutes):02}:{seconds:05.2f}"
+        return f"{int(minutes):02}:{seconds:05.2f}"
+    
+    @staticmethod
+    def _total_seconds(time_str):
+        minutes, seconds = map(float, time_str.split(':'))
+        return minutes * 60 + seconds
+    
+    def align_text(self, textgrid_path: str | Path):
         """
         Align text lines with TextGrid timestamps, default text file is the same as the textgrid file with .txt extension
-        first align each line start and end timestamp with textgrid, then merge lines that are too close to each other
+        first align each line start and end timestamp with textgrid (file '.aligned.txt'), then merge lines that are too close to each other (file '.merged_aligned.txt')
         side effect is to write a new text file with all lines' timestamps to ".aligned.txt" and another text with merged lines' timestamps to ".merged_aligned.txt"
         the text and textgrid are only iterated only each once, each line content of text should be the same as textgrid or just one character difference, otherwise the alignmen will be wrong.
         """
-        MAX_MERGED_LINE_TIME = 25.0
-        tg_path = Path(self.textgrid_path)
+        MAX_MERGED_LINE_TIME = 28.0
+        tg_path = Path(textgrid_path)
         if not tg_path.exists():
             return
         text_path = tg_path.with_suffix('.txt')
@@ -260,28 +274,18 @@ class JapaneseTextAligner:
         segments = self._get_word_segments(tg)    
 
         # align each line start and end timestamp with textgrid
-        skip = False
-        aligned_txt = tg_path.with_suffix('.aligned.txt')
-        if aligned_txt.exists():
-            response = input(f"{aligned_txt} already exists, do you want to overwrite it? (y/n)")
-            skip = response.lower().strip() == 'n'
-        if not skip:
-            with open(aligned_txt, 'w', encoding='utf-8') as f:
-                for i, line in enumerate(text_lines):
-                    line_num = i + 1
-                    line_timestamps = self._find_line_matches(line, segments, line_num)
-                    f.write(f"{line_num}\t{line_timestamps.start_time:07.2f}\t{line_timestamps.end_time:07.2f}\t{line}\n")
+        all_line_timestamps = []
+        for i, line in enumerate(text_lines):
+            line_num = i + 1
+            line_timestamp = self._find_line_matches(line, segments, line_num)
+            all_line_timestamps.append(line_timestamp)
 
         # then merge lines that are too close to each other
-        skip = False
-        merged_lines_txt = tg_path.with_suffix('.merged_aligned.txt')
+        merged_lines_txt = tg_path.with_suffix('.aligned.txt')
         if merged_lines_txt.exists():
             response = input(f"{merged_lines_txt} already exists, do you want to overwrite it? (y/n)")
-            skip = response.lower().strip() == 'n'
-        if skip:
-            return
-        with open(aligned_txt, 'r', encoding='utf-8') as f:
-            all_line_timestamps = [TextSegment(*map(float, line.split('\t')[1:3]), line.split('\t')[3].strip()) for line in f]
+            if response.lower().strip() == 'n':
+                return
         merged_line_timestamps = []
         current_start = all_line_timestamps[0].start_time
         current_end = all_line_timestamps[0].end_time
@@ -300,37 +304,74 @@ class JapaneseTextAligner:
                 if i > 0 and merged_line_timestamps[i].start_time - merged_line_timestamps[i-1].end_time < 0.5:
                     logger.warning(f"Merged_line {i+1} too close to previous line: {merged_line_timestamps[i].start_time - merged_line_timestamps[i-1].end_time:.2f} seconds")
                 line_num = i + 1
-                def format_time(total_seconds):
-                    minutes, seconds = divmod(total_seconds, 60)
-                    return f"{int(minutes):02}:{seconds:05.2f}"
-                f.write(f"{line_num}\t{format_time(line.start_time)}\t{format_time(line.end_time)}\t{line.line_text}\n")
+                f.write(f"{self._format_time(line.start_time)}\t{self._format_time(line.end_time)}\t{line.line_text}\n")
+    
+    @ staticmethod
+    def _format_check(text_path: str | Path, with_num: bool = False):
+        """
+        Check if the text file format is correct
+        line_num | start_time | end_time | line_text
+        side effect is to write a new text file with all lines' timestamps to ".ok.txt"
+        """
+        logger.info(f"Format check start")
+        text_path = Path(text_path)
+        with open(text_path, 'r', encoding='utf-8') as f:
+            texts = f.read()
+        post_texts = postprocess_text(texts)
+        if post_texts != texts:
+            logger.warning("postprocess_text Done!")
+        lines = post_texts.splitlines()
+        line_num = 0
+        checked_lines = []
+        line_pattern = r'^(\d{1,2})\t(\d{2}:\d{2}\.\d{2})\t(\d{2}:\d{2}\.\d{2})\t(.+)$' if with_num else r'^(\d{2}:\d{2}\.\d{2})\t(\d{2}:\d{2}\.\d{2})\t(.+)$'
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            match = re.match(line_pattern, line)
+            if not match:
+                logger.warning(f"Line {line_num} format error: {line}")
+                continue
+            if with_num:
+                _,start_time, end_time, line_text = match.groups()
+            else:
+                start_time, end_time, line_text = match.groups()
+            start_time_format, end_time_format = map(JapaneseTextAligner._total_seconds, [start_time, end_time])
+            if start_time_format > end_time_format or end_time_format - start_time_format > 29.60:
+                logger.warning(f"Line {line_num} time range error: {line}")
+            checked_lines.append(f'{line_num}\t{start_time}\t{end_time}\t{line_text}')
+        output_path = Path(str(text_path).replace('.aligned', '.ok'))
+        output_path.write_text('\n'.join(checked_lines), encoding='utf-8')
+        logger.info(f"Format check Done, {line_num} lines checked")
 
-    def split_audio(self, timestamps: List[LineSegment],audio_path = None):
-        """Split audio based on timestamps"""
-        if not timestamps or not audio_path:
-            return
-        audio = Path(audio_path)
-        if not audio.exists():
-            return
-        output = audio.parent / "split"
-        output.mkdir(parents=True, exist_ok=True)
-        timestamps.sort(key=lambda x: x.start_time)
-        time_ranges = []
-        time_boundary = 25.0
-        current_start = timestamps[0].start_time
-        current_end = timestamps[0].end_time
-        for timestamp in timestamps[1:]:
-            if timestamp.end_time - current_start > time_boundary:
-                time_ranges.append((current_start, current_end))
-                current_start = timestamp.start_time
-            current_end = timestamp.end_time
-        time_ranges.append((current_start, current_end))
-        for time_range in time_ranges:
-            start_time = time_range[0]
-            end_time = time_range[1]
-            output_path = output.joinpath(audio.stem + f"_{start_time:.1f}_{end_time:.1f}{audio.suffix}")
-            subprocess.run([
-                "ffmpeg", "-i", audio_path, "-ss", str(start_time), "-to", str(end_time),
-                "-c", "copy", output_path
-            ])
+def split_audio(audio_path: str | Path):
+    """
+    Split audio based on timestamps,default audio path is the same as timestamps file with '.ok.txt' extension
+    """
+    audio = Path(audio_path)
+    timestamps_path = audio.with_suffix('.ok.txt')
+    if not audio.exists() or not timestamps_path.exists():
+        return
+    if (jscode := re.match(r'^RJ\d+', audio.stem)):
+        jscode = jscode.group()
+    output = audio.parent / jscode
+    output.mkdir(parents=True, exist_ok=True)
+    timestamps = []
+    with open(timestamps_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line_num = int(line.split('\t')[0])
+            start_time, end_time = map(JapaneseTextAligner._total_seconds, line.split('\t')[1:3])
+            text = line.split('\t')[3].strip()
+            timestamps.append(LineSegment(line_num, start_time, end_time, 1.0, text))
+
+    timestamps.sort(key=lambda x: x.start_time)
+    for timestamp in timestamps:
+        audio_out_path = output.joinpath(audio.stem + f"_{timestamp.line_num}{audio.suffix}")
+        text_out_path = audio_out_path.with_suffix('.txt')
+        text_out_path.write_text(timestamp.line_text, encoding='utf-8')
+        logger.info(f"Split audio to {audio_out_path}")
+        subprocess.run([
+            "ffmpeg", "-i", audio_path, "-loglevel", "warning", "-ss", str(timestamp.start_time), "-to", str(timestamp.end_time),
+            "-c", "copy", audio_out_path
+        ])
     

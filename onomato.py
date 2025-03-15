@@ -103,6 +103,8 @@ def preprocess_text(text):
     '''
     # text = jaconv.kata2hira(text)
     # invisible characters, \uFE0F 
+    if '○' in text:
+        logger.warning("censorship mark '○' found in text, please replace them correctly")
     text = re.sub(r'[\p{M}\p{Cf}]', '', text)
     # content in parenthesis
     text = re.sub(r'【[^】]*】|（[^）]*）|〈[^〉]*〉|（[^）]*）|^[^\S\n]*//.*\n', '', text, flags=re.MULTILINE)
