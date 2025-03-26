@@ -9,6 +9,7 @@ import subprocess
 from difflib import SequenceMatcher
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
+import pandas as pd
 
 basicConfig(level=DEBUG)
 logger = getLogger(__name__)    
@@ -344,7 +345,7 @@ class JapaneseTextAligner:
         output_path.write_text('\n'.join(checked_lines), encoding='utf-8')
         logger.info(f"Format check Done, {line_num} lines checked")
 
-def split_audio(audio_path: str | Path):
+def split_audio(audio_path: str | Path, out_path: str | Path = None):
     """
     Split audio based on timestamps,default audio path is the same as timestamps file with '.ok.txt' extension
     """
@@ -354,7 +355,7 @@ def split_audio(audio_path: str | Path):
         return
     if (jscode := re.match(r'^RJ\d+', audio.stem)):
         jscode = jscode.group()
-    output = audio.parent / jscode
+    output = audio.parent / jscode if out_path is None else Path(out_path)
     output.mkdir(parents=True, exist_ok=True)
     timestamps = []
     with open(timestamps_path, 'r', encoding='utf-8') as f:
@@ -362,16 +363,18 @@ def split_audio(audio_path: str | Path):
             line_num = int(line.split('\t')[0])
             start_time, end_time = map(JapaneseTextAligner._total_seconds, line.split('\t')[1:3])
             text = line.split('\t')[3].strip()
-            timestamps.append(LineSegment(line_num, start_time, end_time, 1.0, text))
+            timestamps.append(TextSegment(start_time, end_time, text))
 
     timestamps.sort(key=lambda x: x.start_time)
-    for timestamp in timestamps:
-        audio_out_path = output.joinpath(audio.stem + f"_{timestamp.line_num}{audio.suffix}")
+    for num, timestamp in enumerate(timestamps, 1):
+        audio_out_path = output.joinpath(audio.stem + f"_{num}{audio.suffix}")
         text_out_path = audio_out_path.with_suffix('.txt')
         text_out_path.write_text(timestamp.line_text, encoding='utf-8')
         logger.info(f"Split audio to {audio_out_path}")
+        start_time = timestamp.start_time - 0.20
+        end_time = timestamp.end_time + 0.20
         subprocess.run([
-            "ffmpeg", "-i", audio_path, "-loglevel", "warning", "-ss", str(timestamp.start_time), "-to", str(timestamp.end_time),
+            "ffmpeg", "-i", audio_path, "-loglevel", "warning", "-ss", f"{start_time:.2f}", "-to", f"{end_time:.2f}",
             "-c", "copy", audio_out_path
         ])
     
