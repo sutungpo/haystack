@@ -13,6 +13,7 @@ logger = getLogger(__name__)
 # full-width tilde \uFF5E and wave dash \u301C
 Japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
 Full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
+dakuten_mark = r"\u3099\u309A\uFF9E\uFF9F"
 Japanese_punctuations = r'。、！？「」『』（）［］｛｝…ー・～〝〟'
 
 KANA_ORDER = [
@@ -118,10 +119,13 @@ def postprocess_text(text):
     '''
     text = re.sub('[♡❤♥♪〓]+', r'\u3000', text)
     text = re.sub(r'\s*\n', '\n', text)
-    text = re.sub(r'^\P{L}*\n|^[^\S]+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'[\u0020\u3000]{2,}', lambda m: m.group(0)[0], text)
     text = re.sub(r'^[\u3000+\u0020]+|[\u3000\u0020]+$', '', text, flags=re.MULTILINE)
     text = re.sub(rf'([{Japanese_punctuations}])\u3000|\u3000', lambda m: m.group(1) if m.group(1) else '、', text)
+    # remove contains only single Japanese character + punctuations + ﾞ
+    text = re.sub(rf'^[\p{{Hiragana}}\p{{IsKatakana}}\p{{IsHan}}]?[～\p{{P}}{dakuten_mark}\s]*$', '', text, flags=re.MULTILINE)
+    # remove empty line or line with none language characters
+    text = re.sub(r'^\P{L}*\n|^[^\S]+$', '', text, flags=re.MULTILINE)
     return text
 
 def merge_input_to_onomato_list(text=None):
