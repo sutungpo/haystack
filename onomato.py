@@ -2,6 +2,8 @@ import sys
 import difflib
 import regex as re
 import jaconv
+import neologdn
+import unicodedata
 from pathlib import Path
 from functools import lru_cache
 from collections import defaultdict
@@ -11,8 +13,8 @@ basicConfig(level=DEBUG)
 logger = getLogger(__name__)
 
 # full-width tilde \uFF5E and wave dash \u301C
-Japanese_characters = r"\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
-Full_width_alpnums = r'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
+Japanese_characters = "\p{Hiragana}\p{IsKatakana}\p{IsHan}ー゛゜々ゝヽヾ\uFF5E\u301C"
+Full_width_alpnums = 'A-Za-z0-9\uFF21-\uFF3A\uFF41-\uFF5A\uFF10-\uFF19'
 dakuten_mark = r"\u3099\u309A\uFF9E\uFF9F"
 Japanese_punctuations = r'。、！？「」『』（）［］｛｝…ー・～〝〟'
 
@@ -108,7 +110,7 @@ def preprocess_text(text):
         logger.warning("censorship mark '○' found in text, please replace them correctly")
     text = re.sub(r'[\p{M}\p{Cf}]', '', text)
     # content in parenthesis
-    text = re.sub(r'【[^】]*】|（[^）]*）|〈[^〉]*〉|（[^）]*）|^[^\S\n]*//.*\n', '', text, flags=re.MULTILINE)
+    text = re.sub(r'【[^】]*】|（[^）]*）|〈[^〉]*〉|\([^\)]*\)|^[^\S\n]*//.*\n|＠.*$\n?', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n+', '\n', text)
 
     return text
@@ -117,15 +119,18 @@ def postprocess_text(text):
     '''
     reduce multiple fullwidth space to single fullwidth space, filter out fullwidth space if at the end or begin, after that, reduce multiple \n to \n
     '''
-    text = re.sub('[♡❤♥♪〓]+', r'\u3000', text)
+    text = re.sub('[♡❤♥♪〓●◯〇]+', r'\u3000', text)
     text = re.sub(r'\s*\n', '\n', text)
     text = re.sub(r'[\u0020\u3000]{2,}', lambda m: m.group(0)[0], text)
     text = re.sub(r'^[\u3000+\u0020]+|[\u3000\u0020]+$', '', text, flags=re.MULTILINE)
-    text = re.sub(rf'([{Japanese_punctuations}])\u3000|\u3000', lambda m: m.group(1) if m.group(1) else '、', text)
+    text = re.sub(rf'([{Japanese_punctuations}])\u3000|\u3000', lambda m: m.group(1) if m.group(1) else '…', text)
     # remove contains only single Japanese character + punctuations + ﾞ
     text = re.sub(rf'^[\p{{Hiragana}}\p{{IsKatakana}}\p{{IsHan}}]?[～\p{{P}}{dakuten_mark}\s]*$', '', text, flags=re.MULTILINE)
     # remove empty line or line with none language characters
     text = re.sub(r'^\P{L}*\n|^[^\S]+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'[…]{2,}', '…', text)
+    text = re.sub(r'[^\S\n\t]+', '', text)
+    text = normalize_japanese_text(text)
     return text
 
 def merge_input_to_onomato_list(text=None):
@@ -155,7 +160,7 @@ class OnomatopoeiaPatternMatcher:
         with open(candidate_file, 'r', encoding='utf-8') as f:
             self.candidate_words = [line.strip() for line in f.readlines() if line.strip()]
         # Special suffix words (送り仮名など)
-        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "ぃ", "ー", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ", "ォ"]
+        self.special_chars = [ "あ","ぁ", "へ", "ぉ", "お", "れろ", "ん", "う", "ぅ", "ぃ", "ー", "～", "〜", "っ", "つ","ッ", "゛", "ル", "ォォ", "ォ", "ぇ", "ぇぇ"]
         ## exceptions are words that are not onomatopoeia but are match the pattern
         self.exceptions = ['ううん', 'ううんっ','はぁーい', 'はぁい', 'あっつ', 'やぁっ', 'あほっ', 'おはっ']
         ## unknown not sure onomatopoeia or not
@@ -279,41 +284,49 @@ def filter_onomatopoeia_from_text(text):
     result = postprocess_text(result)
     return result
 
-def compare_texts_char_level_with_positions(original, processed):
-    '''
-    print("Inserted characters (position, char):", inserted)
-    print("Deleted characters (position, char):", deleted)
-    '''
-    # Convert text into lists of characters
-    original_chars = list(original)
-    processed_chars = list(processed)
+def normalize_japanese_text(text):
+    """
+    Normalize Japanese text by converting full-width characters to half-width, removing whitespace, and converting to lowercase
+    """
+    text = neologdn.normalize(text,tilde="normalize_zenkaku")
+    text = unicodedata.normalize('NFKC', text)  # Normalize Unicode characters
+    text = re.sub(r'[〜]+', lambda m: m.group(0)[0], text)
+    to_normalized_chars = {
+        '...':'…',
+        '?':'？',
+        '!':'！',
+    }
+    for key, value in to_normalized_chars.items():
+        text = text.replace(key, value)
+    return text
 
-    # Use difflib to get the differences
-    diff = list(difflib.ndiff(original_chars, processed_chars))
+from rapidfuzz.distance import Levenshtein
 
-    inserted = []
-    deleted = []
-
-    original_index = 0  # Tracks position in the original text
-    processed_index = 0  # Tracks position in the processed text
-
-    for item in diff:
-        if item.startswith(' '):  # No change
-            original_index += 1
-            processed_index += 1
-        elif item.startswith('-'):  # Deleted character
-            deleted.append((original_index, item[2:]))  # Store (position, character)
-            original_index += 1
-        elif item.startswith('+'):  # Inserted character
-            inserted.append((processed_index, item[2:]))  # Store (position, character)
-            processed_index += 1
-    inserted_chars = segment_to_words(''.join([char[1] for char in inserted]))
-    deleted_chars = segment_to_words(''.join([char[1] for char in deleted]))
-    matcher = OnomatopoeiaPatternMatcher('onomato.txt')
-    final_deleted = []
-    for char in deleted_chars:
-        match = re.search(r'\p{L}+', char)
-        if match:
-            if match.group() not in matcher.candidate_words:
-                final_deleted.append(char)
-    return inserted_chars, final_deleted
+def compare_texts_char_level_with_positions(text1, text2):
+    # Split texts by punctuation
+    pattern = r'([。、！？「」『』（）…!?\.{3,}\s]+)'
+    
+    # Generate tokens including punctuation
+    tokens1 = [t for t in re.split(f'{pattern}', text1) if t.strip()]
+    tokens2 = [t for t in re.split(f'{pattern}', text2) if t.strip()]
+    
+    # Get edit operations from sequence matcher
+    operations = Levenshtein.editops(tokens1, tokens2)
+    
+    # Process operations to collect changes
+    deletions = []
+    additions = []
+    
+    for op, src_pos, dest_pos in operations:
+        if op == 'delete':
+            deletions.append(tokens1[src_pos])
+        elif op == 'insert':
+            additions.append(tokens2[dest_pos])
+        elif op == 'replace':
+            deletions.append(tokens1[src_pos])
+            additions.append(tokens2[dest_pos])
+    
+    return {
+        'deleted': deletions,
+        'added': additions
+    }

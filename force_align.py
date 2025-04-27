@@ -5,6 +5,7 @@ from logging import getLogger, basicConfig, DEBUG
 from onomato import *
 import textgrid
 import unicodedata
+import neologdn
 import subprocess
 from difflib import SequenceMatcher
 from typing import List, Tuple, Optional
@@ -127,8 +128,10 @@ class JapaneseTextAligner:
 
     def _normalize_japanese(self, text: str) -> str:
         """Normalize Japanese text for better matching"""
-        text = unicodedata.normalize('NFKC', text)
+        text = neologdn.normalize(text, tilde="normalize_zenkaku")
         # the alphanumeric characters are converted from full width to ascii lowercase
+        # 〜 hexadecimal \u301c
+        text = re.sub(r'[\u301c]', '', text)
         text = text.lower()
         return ''.join(text.split())
 
@@ -175,6 +178,7 @@ class JapaneseTextAligner:
         # Build sequence and track scores
         for end in range(start, len(segments)):
             combined_text += segments[end].line_text
+            combined_text = self._normalize_japanese(combined_text)
             matcher.set_seq1(combined_text)
             score = matcher.ratio()
             if score < 0.01:
@@ -213,7 +217,7 @@ class JapaneseTextAligner:
         start_idx, end_idx, confidence = self._find_growing_sequence(filtered_line, segments)
         
         if confidence < 0.6:  # Minimum threshold
-            logger.warning(f"Line {line_num} {line} has low confidence: {confidence:.2f}")
+            logger.error(f"Line {line_num} {line} has low confidence: {confidence:.2f}")
         start_text = segments[start_idx].line_text
         end_text = segments[end_idx].line_text
         start_time = segments[start_idx].start_time
@@ -225,11 +229,13 @@ class JapaneseTextAligner:
                 logger.warning(f"Line {line_num} too close with previous line: {start_time - pre_end_time:.2f} seconds")
         # error detection, too long means this line's match error, it will cover next lines' timestamps, and make them errors too, if the line's endtime is too close(<0.2s) to next line's starttime, it will be considered as a match error for both of these two lines
         if end_time - start_time > MAX_LINE_TIME:
-            logger.error(f"Line {line_num} {line} is too long: {end_time - start_time:.2f} seconds")
+            logger.warning(f"Line {line_num} {line} is too long: {end_time - start_time:.2f} seconds")
         # Check if the start and end texts match the line
-        if not re.search(f'^{start_text}', filtered_line):
+        start_pattern = re.escape(start_text)
+        end_pattern = re.escape(end_text)
+        if not re.search(f'^{start_pattern}', filtered_line):
             logger.warning(f"Line {line_num} Start text mismatch: {start_text} vs {filtered_line}")
-        elif not re.search(f'{end_text}$', filtered_line):
+        elif not re.search(f'{end_pattern}$', filtered_line):
             logger.warning(f"Line {line_num} End text mismatch: {end_text} vs {filtered_line}")
         
         return TextSegment(
@@ -373,8 +379,7 @@ def split_audio(audio_path: str | Path, out_path: str | Path = None):
         logger.info(f"Split audio to {audio_out_path}")
         start_time = timestamp.start_time - 0.20
         end_time = timestamp.end_time + 0.20
-        subprocess.run([
-            "ffmpeg", "-i", audio_path, "-loglevel", "warning", "-ss", f"{start_time:.2f}", "-to", f"{end_time:.2f}",
-            "-c", "copy", audio_out_path
-        ])
-    
+        cmd = [
+            "ffmpeg", "-nostdin", "-threads", "0", "-i", str(audio_path), "-loglevel", "warning", "-ss", f"{start_time:.2f}", "-to", f"{end_time:.2f}", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "128k", str(audio_out_path)
+        ]
+        subprocess.run(cmd, check=True)
